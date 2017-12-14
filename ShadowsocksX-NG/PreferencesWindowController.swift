@@ -7,6 +7,8 @@
 //
 
 import Cocoa
+import RxCocoa
+import RxSwift
 
 class PreferencesWindowController: NSWindowController
     , NSTableViewDataSource, NSTableViewDelegate {
@@ -14,17 +16,31 @@ class PreferencesWindowController: NSWindowController
     @IBOutlet weak var profilesTableView: NSTableView!
     
     @IBOutlet weak var profileBox: NSBox!
+    @IBOutlet weak var kcptunProfileBox: NSBox!
     
     @IBOutlet weak var hostTextField: NSTextField!
     @IBOutlet weak var portTextField: NSTextField!
+    @IBOutlet weak var kcptunPortTextField: NSTextField!
     @IBOutlet weak var methodTextField: NSComboBox!
     
+    @IBOutlet weak var passwordTabView: NSTabView!
     @IBOutlet weak var passwordTextField: NSTextField!
+    @IBOutlet weak var passwordSecureTextField: NSSecureTextField!
+    @IBOutlet weak var togglePasswordVisibleButton: NSButton!
+    
     @IBOutlet weak var remarkTextField: NSTextField!
     
     @IBOutlet weak var otaCheckBoxBtn: NSButton!
     
-    @IBOutlet weak var copyURLBtn: NSButton!
+    @IBOutlet weak var kcptunCheckBoxBtn: NSButton!
+    @IBOutlet weak var kcptunCryptComboBox: NSComboBox!
+    @IBOutlet weak var kcptunKeyTextField: NSTextField!
+    @IBOutlet weak var kcptunModeComboBox: NSComboBox!
+    @IBOutlet weak var kcptunNocompCheckBoxBtn: NSButton!
+    @IBOutlet weak var kcptunDatashardTextField: NSTextField!
+    @IBOutlet weak var kcptunParityshardTextField: NSTextField!
+    @IBOutlet weak var kcptunMTUTextField: NSTextField!
+    @IBOutlet weak var kcptunArgumentsTextField: NSTextField!
     
     @IBOutlet weak var removeButton: NSButton!
     let tableViewDragType: String = "ss.server.profile.data"
@@ -33,27 +49,60 @@ class PreferencesWindowController: NSWindowController
     var profileMgr: ServerProfileManager!
     
     var editingProfile: ServerProfile!
+    
+    var enabledKcptunSubDisosable: Disposable?
 
 
     override func windowDidLoad() {
         super.windowDidLoad()
 
         // Implement this method to handle any initialization after your window controller's window has been loaded from its nib file.
+        
         defaults = UserDefaults.standard
         profileMgr = ServerProfileManager.instance
         
         methodTextField.addItems(withObjectValues: [
+            "aes-128-gcm",
+            "aes-192-gcm",
+            "aes-256-gcm",
             "aes-128-cfb",
             "aes-192-cfb",
             "aes-256-cfb",
-            "des-cfb",
+            "aes-128-ctr",
+            "aes-192-ctr",
+            "aes-256-ctr",
+            "camellia-128-cfb",
+            "camellia-192-cfb",
+            "camellia-256-cfb",
             "bf-cfb",
-            "cast5-cfb",
-            "rc4-md5",
-            "chacha20",
+            "chacha20-ietf-poly1305",
             "salsa20",
-            "rc4",
-            "table",
+            "chacha20",
+            "chacha20-ietf",
+            "rc4-md5",
+            ])
+        
+        kcptunCryptComboBox.addItems(withObjectValues: [
+            "none",
+            "aes",
+            "aes-128",
+            "aes-192",
+            "salsa20",
+            "blowfish",
+            "twofish",
+            "cast5",
+            "3des",
+            "tea",
+            "xtea",
+            "xor",
+            ])
+        
+        kcptunModeComboBox.addItems(withObjectValues: [
+            "default",
+            "normal",
+            "fast",
+            "fast2",
+            "fast3",
             ])
         
         profilesTableView.reloadData()
@@ -61,7 +110,8 @@ class PreferencesWindowController: NSWindowController
     }
     
     override func awakeFromNib() {
-        profilesTableView.register(forDraggedTypes: [tableViewDragType])
+        profilesTableView.registerForDraggedTypes([NSPasteboard.PasteboardType(rawValue: tableViewDragType)])
+        profilesTableView.allowsMultipleSelection = true
     }
     
     @IBAction func addProfile(_ sender: NSButton) {
@@ -75,7 +125,7 @@ class PreferencesWindowController: NSWindowController
         profileMgr.profiles.append(profile)
         
         let index = IndexSet(integer: profileMgr.profiles.count-1)
-        profilesTableView.insertRows(at: index, withAnimation: .effectFade)
+        profilesTableView.insertRows(at: index, withAnimation: NSTableView.AnimationOptions.effectFade)
         
         self.profilesTableView.scrollRowToVisible(self.profileMgr.profiles.count-1)
         self.profilesTableView.selectRowIndexes(index, byExtendingSelection: false)
@@ -84,13 +134,20 @@ class PreferencesWindowController: NSWindowController
     }
     
     @IBAction func removeProfile(_ sender: NSButton) {
-        let index = profilesTableView.selectedRow
+        let index = Int(profilesTableView.selectedRowIndexes.first!)
+        var deleteCount = 0
         if index >= 0 {
             profilesTableView.beginUpdates()
-            profileMgr.profiles.remove(at: index)
-            profilesTableView.removeRows(at: IndexSet(integer: index), withAnimation: .effectFade)
+            for (_, toDeleteIndex) in profilesTableView.selectedRowIndexes.enumerated() {
+                print(profileMgr.profiles.count)
+                profileMgr.profiles.remove(at: toDeleteIndex - deleteCount)
+                profilesTableView.removeRows(at: IndexSet(integer: toDeleteIndex - deleteCount), withAnimation: NSTableView.AnimationOptions.effectFade)
+                deleteCount += 1
+            }
             profilesTableView.endUpdates()
         }
+        self.profilesTableView.scrollRowToVisible(index-1)
+        self.profilesTableView.selectRowIndexes(IndexSet(integer: index-1), byExtendingSelection: false)
         updateProfileBoxVisible()
     }
     
@@ -103,15 +160,47 @@ class PreferencesWindowController: NSWindowController
             }
         }
         profileMgr.save()
+        ServerProfileManager.instance.refreshPing()
         window?.performClose(nil)
 
         
         NotificationCenter.default
-            .post(name: Notification.Name(rawValue: NOTIFY_SERVER_PROFILES_CHANGED), object: nil)
+            .post(name: NOTIFY_SERVER_PROFILES_CHANGED, object: nil)
     }
     
     @IBAction func cancel(_ sender: NSButton) {
         window?.performClose(self)
+    }
+    
+    @IBAction func duplicate(_ sender: Any) {
+        var copyCount = 0
+        for (_, toDuplicateIndex) in profilesTableView.selectedRowIndexes.enumerated() {
+            print(profileMgr.profiles.count)
+            let profile = profileMgr.profiles[toDuplicateIndex + copyCount]
+            let duplicateProfile = profile.copy() as! ServerProfile
+            duplicateProfile.uuid = UUID().uuidString
+            profileMgr.profiles.insert(duplicateProfile, at:toDuplicateIndex + copyCount)
+            
+            profilesTableView.beginUpdates()
+            let index = IndexSet(integer: toDuplicateIndex + copyCount)
+            profilesTableView.insertRows(at: index, withAnimation: NSTableView.AnimationOptions.effectFade)
+            self.profilesTableView.scrollRowToVisible(toDuplicateIndex + copyCount)
+            self.profilesTableView.selectRowIndexes(index, byExtendingSelection: false)
+            profilesTableView.endUpdates()
+            
+            copyCount += 1
+        }
+        updateProfileBoxVisible()
+    }
+    
+    @IBAction func togglePasswordVisible(_ sender: Any) {
+        if passwordTabView.selectedTabViewItem?.identifier as! String == "secure" {
+            passwordTabView.selectTabViewItem(withIdentifier: "insecure")
+            togglePasswordVisibleButton.image = NSImage(named: NSImage.Name(rawValue: "icons8-Eye Filled-50"))
+        } else {
+            passwordTabView.selectTabViewItem(withIdentifier: "secure")
+            togglePasswordVisibleButton.image = NSImage(named: NSImage.Name(rawValue: "icons8-Blind Filled-50"))
+        }
     }
     
     @IBAction func copyCurrentProfileURL2Pasteboard(_ sender: NSButton) {
@@ -122,7 +211,7 @@ class PreferencesWindowController: NSWindowController
             if let url = ssURL {
                 // Then copy url to pasteboard
                 // TODO Why it not working?? It's ok in objective-c
-                let pboard = NSPasteboard.general()
+                let pboard = NSPasteboard.general
                 pboard.clearContents()
                 let rs = pboard.writeObjects([url as NSPasteboardWriting])
                 if rs {
@@ -135,7 +224,7 @@ class PreferencesWindowController: NSWindowController
     }
     
     func updateProfileBoxVisible() {
-        if profileMgr.profiles.count <= 1 {
+        if profileMgr.profiles.count <= 0 {
             removeButton.isEnabled = false
         }else{
             removeButton.isEnabled = true
@@ -150,35 +239,85 @@ class PreferencesWindowController: NSWindowController
     
     func bindProfile(_ index:Int) {
         NSLog("bind profile \(index)")
+        if let dis = enabledKcptunSubDisosable {
+            dis.dispose()
+            enabledKcptunSubDisosable = Optional.none
+        }
         if index >= 0 && index < profileMgr.profiles.count {
             editingProfile = profileMgr.profiles[index]
             
-            hostTextField.bind("value", to: editingProfile, withKeyPath: "serverHost"
-                , options: [NSContinuouslyUpdatesValueBindingOption: true])
-            portTextField.bind("value", to: editingProfile, withKeyPath: "serverPort"
-                , options: [NSContinuouslyUpdatesValueBindingOption: true])
             
-            methodTextField.bind("value", to: editingProfile, withKeyPath: "method"
-                , options: [NSContinuouslyUpdatesValueBindingOption: true])
-            passwordTextField.bind("value", to: editingProfile, withKeyPath: "password"
-                , options: [NSContinuouslyUpdatesValueBindingOption: true])
+            enabledKcptunSubDisosable = editingProfile.rx.observeWeakly(Bool.self, "enabledKcptun")
+                .subscribe(onNext: { v in
+                    if let enabled = v {
+                        self.portTextField.isEnabled = !enabled
+                    }
+            })
             
-            remarkTextField.bind("value", to: editingProfile, withKeyPath: "remark"
-                , options: [NSContinuouslyUpdatesValueBindingOption: true])
+            hostTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "serverHost"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            portTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "serverPort"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
             
-            otaCheckBoxBtn.bind("value", to: editingProfile, withKeyPath: "ota"
-                , options: [NSContinuouslyUpdatesValueBindingOption: true])
+            methodTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "method"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            passwordTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "password"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            passwordSecureTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "password"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            
+            remarkTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "remark"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            
+            otaCheckBoxBtn.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "ota"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            
+            // --------------------------------------------------
+            // Kcptun
+            kcptunCheckBoxBtn.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "enabledKcptun"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            
+            kcptunPortTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "serverPort"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            
+            kcptunProfileBox.bind(NSBindingName(rawValue: "Hidden"), to: editingProfile, withKeyPath: "enabledKcptun"
+                , options: [NSBindingOption.continuouslyUpdatesValue: false,
+                            NSBindingOption.valueTransformerName: NSValueTransformerName.negateBooleanTransformerName])
+            
+            kcptunNocompCheckBoxBtn.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "kcptunProfile.nocomp", options: nil)
+            
+            kcptunModeComboBox.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "kcptunProfile.mode", options: nil)
+            
+            kcptunCryptComboBox.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "kcptunProfile.crypt", options: nil)
+            
+            kcptunKeyTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "kcptunProfile.key"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            
+            kcptunDatashardTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "kcptunProfile.datashard"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            
+            kcptunParityshardTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "kcptunProfile.parityshard"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            
+            kcptunMTUTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "kcptunProfile.mtu"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            
+            kcptunArgumentsTextField.bind(NSBindingName(rawValue: "value"), to: editingProfile, withKeyPath: "kcptunProfile.arguments"
+                , options: [NSBindingOption.continuouslyUpdatesValue: true])
+            
         } else {
             editingProfile = nil
-            hostTextField.unbind("value")
-            portTextField.unbind("value")
+            hostTextField.unbind(NSBindingName(rawValue: "value"))
+            portTextField.unbind(NSBindingName(rawValue: "value"))
             
-            methodTextField.unbind("value")
-            passwordTextField.unbind("value")
+            methodTextField.unbind(NSBindingName(rawValue: "value"))
+            passwordTextField.unbind(NSBindingName(rawValue: "value"))
             
-            remarkTextField.unbind("value")
+            remarkTextField.unbind(NSBindingName(rawValue: "value"))
             
-            otaCheckBoxBtn.unbind("value")
+            otaCheckBoxBtn.unbind(NSBindingName(rawValue: "value"))
+            
+            kcptunCheckBoxBtn.unbind(NSBindingName(rawValue: "value"))
         }
     }
     
@@ -208,11 +347,11 @@ class PreferencesWindowController: NSWindowController
         
         let (title, isActive) = getDataAtRow(row)
         
-        if tableColumn?.identifier == "main" {
+        if tableColumn?.identifier == NSUserInterfaceItemIdentifier("main") {
             return title
-        } else if tableColumn?.identifier == "status" {
+        } else if tableColumn?.identifier == NSUserInterfaceItemIdentifier("status") {
             if isActive {
-                return NSImage(named: "NSMenuOnStateTemplate")
+                return NSImage(named: NSImage.Name(rawValue: "NSMenuOnStateTemplate"))
             } else {
                 return nil
             }
@@ -224,12 +363,12 @@ class PreferencesWindowController: NSWindowController
     
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> NSPasteboardWriting? {
         let item = NSPasteboardItem()
-        item.setString(String(row), forType: tableViewDragType)
+        item.setString(String(row), forType: NSPasteboard.PasteboardType(rawValue: tableViewDragType))
         return item
     }
     
     func tableView(_ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int
-        , proposedDropOperation dropOperation: NSTableViewDropOperation) -> NSDragOperation {
+        , proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
         if dropOperation == .above {
             return .move
         }
@@ -237,14 +376,15 @@ class PreferencesWindowController: NSWindowController
     }
     
     func tableView(_ tableView: NSTableView, acceptDrop info: NSDraggingInfo
-        , row: Int, dropOperation: NSTableViewDropOperation) -> Bool {
+        , row: Int, dropOperation: NSTableView.DropOperation) -> Bool {
         if let mgr = profileMgr {
             var oldIndexes = [Int]()
-            info.enumerateDraggingItems(options: [], for: tableView, classes: [NSPasteboardItem.self], searchOptions: [:]) {
-                if let str = ($0.0.item as! NSPasteboardItem).string(forType: self.tableViewDragType), let index = Int(str) {
+            info.enumerateDraggingItems(options: [], for: tableView, classes: [NSPasteboardItem.self], searchOptions: [:], using: {
+                (draggingItem: NSDraggingItem, idx: Int, stop: UnsafeMutablePointer<ObjCBool>) in
+                if let str = (draggingItem.item as! NSPasteboardItem).string(forType: NSPasteboard.PasteboardType(rawValue: self.tableViewDragType)), let index = Int(str) {
                     oldIndexes.append(index)
                 }
-            }
+            })
             
             var oldIndexOffset = 0
             var newIndexOffset = 0
@@ -324,7 +464,7 @@ class PreferencesWindowController: NSWindowController
         shakePath.closeSubpath()
         shakeAnimation.path = shakePath
         shakeAnimation.duration = CFTimeInterval(durationOfShake)
-        window?.animations = ["frameOrigin":shakeAnimation]
+        window?.animations = [NSAnimatablePropertyKey(rawValue: "frameOrigin"):shakeAnimation]
         window?.animator().setFrameOrigin(window!.frame.origin)
     }
 }
